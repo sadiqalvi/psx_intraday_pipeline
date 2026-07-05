@@ -184,7 +184,7 @@ def load_config(env_path: Optional[str] = None) -> PipelineConfig:
 
     config = PipelineConfig(
         local_historical_dir=Path(local_hist) if local_hist else PROJECT_ROOT / "data",
-        github_repo=os.environ.get("GITHUB_REPO", "ahmerhkhan/psx-intraday"),
+        github_repo=os.environ.get("GITHUB_REPO", "sadiqalvi/dps_intraday_scraper"),
         github_branch=os.environ.get("GITHUB_BRANCH", "main"),
         github_data_path=os.environ.get("GITHUB_DATA_PATH", "data/raw/"),
         github_token=os.environ.get("GITHUB_TOKEN"),
