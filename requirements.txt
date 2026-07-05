@@ -1,0 +1,9 @@
+polars
+pandas
+pyarrow
+duckdb
+psycopg[binary]
+pandas-market-calendars
+pyyaml
+python-dotenv
+requests

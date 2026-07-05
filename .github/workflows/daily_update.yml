@@ -1,0 +1,28 @@
+name: PSX Daily Candle Update
+on:
+  schedule:
+    - cron: "0 13 * * 1-5"   # 13:00 UTC = 18:00 (6:00 PM) Asia/Karachi, Mon-Fri
+  workflow_dispatch: {}
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - name: Run Daily Update (Upload to Postgres)
+        run: python scripts/daily_update.py
+        env:
+          PG_DSN: "postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@${{ secrets.DB_HOST }}:${{ secrets.DB_PORT }}/${{ secrets.DB_NAME }}"
+          GITHUB_TOKEN: ${{ secrets.GH_DATA_TOKEN }}
+          DB_BACKEND: postgresql
+          LOCAL_HISTORICAL_DIR: ./data
+          GITHUB_REPO: ahmerhkhan/psx-intraday
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: reports, path: reports/ }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: csv_out, path: csv_out/ }

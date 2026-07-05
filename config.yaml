@@ -1,0 +1,28 @@
+timezone: "Asia/Karachi"
+
+session:
+  start: "09:30"
+  end:   "15:30"
+  days:  [mon, tue, wed, thu, fri]
+  friday:
+    - start: "09:15"
+      end:   "12:00"
+    - start: "14:00"
+      end:   "16:30"
+  overrides: []
+
+thresholds:
+  spike_pct: 0.20
+  min_session_minutes: 60   # minimum populated minutes for COMPLETE status
+
+columns:       # map to actual raw column headers
+  symbol: "symbol"
+  price: "price"
+  volume: "volume"
+  timestamp: "time"
+
+timestamp_format: "naive_utc"   # auto | epoch_s | epoch_ms | iso | naive_local | naive_utc
+
+file_layout: "one_per_day"      # one_per_day | single_file | one_per_symbol
+
+source_format: "sqlite"         # sqlite | csv  (the existing data is SQLite .db files)

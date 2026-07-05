@@ -1,0 +1,33 @@
+# PSX Holidays — Oct 2025 to Jul 2026
+# Format: YYYY-MM-DD with a descriptive name.
+# The pipeline will mark these dates as non-trading days.
+# Update as needed; unlisted holidays simply appear as MISSING (harmless).
+
+holidays:
+  # 2025
+  - date: "2025-10-27"
+    name: "Eid Milad-un-Nabi (Rabi-ul-Awal 12)"
+  - date: "2025-11-09"
+    name: "Allama Iqbal Day"
+  - date: "2025-12-25"
+    name: "Quaid-e-Azam Day / Christmas"
+
+  # 2026
+  - date: "2026-02-05"
+    name: "Kashmir Day"
+  - date: "2026-03-23"
+    name: "Pakistan Day"
+  - date: "2026-05-01"
+    name: "Labour Day"
+  - date: "2026-06-28"
+    name: "Eid ul-Adha (estimated, Day 1)"
+  - date: "2026-06-29"
+    name: "Eid ul-Adha (estimated, Day 2)"
+  - date: "2026-06-30"
+    name: "Eid ul-Adha (estimated, Day 3)"
+
+  # Ramadan 2026 (approx Feb 18 – Mar 19): session hours change, not closures.
+  # Use config.yaml session overrides for Ramadan timing adjustments.
+
+  # Shab-e-Meraj, Shab-e-Barat, Eid ul-Fitr dates depend on moon sighting.
+  # Add them here as they are announced.
