@@ -98,9 +98,15 @@ def run_backfill(config: PipelineConfig):
         print(f"   {len(dup_dates)} dates have data from multiple files (will merge + dedup ticks)")
 
     # Process every date that has data — no calendar pre-filter.
-    # validate_candles will mark weekends/holidays as MISSING automatically
-    # (they won't have enough session minutes to pass the threshold).
-    all_dates = sorted(data_by_date.keys())
+    # HOWEVER: filter to only dates within the file date range. Each .db file
+    # contains residual rows from old dates (2022, 2023, etc.) left over from
+    # the scraper's internal SQLite. We only want dates between min_date and
+    # max_date (the actual dates of our downloaded files).
+    # validate_candles will still mark weekends/holidays as MISSING naturally.
+    all_dates = sorted(d for d in data_by_date.keys() if min_date <= d <= max_date)
+    skipped = len(data_by_date) - len(all_dates)
+    if skipped:
+        print(f"   Skipped {skipped} out-of-range dates (stale scraper residuals)")
     print(f"   Dates with data: {len(all_dates)}")
     print("Processing days: clean → aggregate → validate → write")
 

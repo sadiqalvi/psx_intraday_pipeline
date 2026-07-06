@@ -236,7 +236,7 @@ class PostgreSQLBackend:
             "COPY _candles_staging (symbol, ts, open, high, low, close, volume, had_trade) FROM STDIN"
         ) as copy:
             for row in df.iter_rows():
-                copy.row(*row)
+                copy.write_row(row)
 
         # Upsert from staging → real table (one SQL statement)
         cursor.execute("""
