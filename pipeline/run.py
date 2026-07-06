@@ -98,12 +98,16 @@ def run_backfill(config: PipelineConfig):
         print(f"   {len(dup_dates)} dates have data from multiple files (will merge + dedup ticks)")
 
     # Process every date that has data — no calendar pre-filter.
-    # HOWEVER: filter to only dates within the file date range. Each .db file
-    # contains residual rows from old dates (2022, 2023, etc.) left over from
-    # the scraper's internal SQLite. We only want dates between min_date and
-    # max_date (the actual dates of our downloaded files).
-    # validate_candles will still mark weekends/holidays as MISSING naturally.
-    all_dates = sorted(d for d in data_by_date.keys() if min_date <= d <= max_date)
+    # HOWEVER: filter to only dates within the file date range (with a 7-day buffer). 
+    # Each .db file contains residual rows from old dates (2022, 2023, etc.) left over 
+    # from the scraper's internal SQLite. We only want dates close to the actual 
+    # dates of our downloaded files. We use a 7-day buffer because a file named 
+    # 20260701.db often contains data from the previous trading session (e.g. 2026-06-30).
+    from datetime import timedelta
+    allowed_start = min_date - timedelta(days=7)
+    allowed_end = max_date + timedelta(days=1)
+    
+    all_dates = sorted(d for d in data_by_date.keys() if allowed_start <= d <= allowed_end)
     skipped = len(data_by_date) - len(all_dates)
     if skipped:
         print(f"   Skipped {skipped} out-of-range dates (stale scraper residuals)")
