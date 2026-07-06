@@ -1,16 +1,20 @@
-name: PSX Daily Candle Update
+name: PSX Full Historical Backfill (One-Time)
 on:
-  schedule:
-    - cron: "0 13 * * 1-5"   # 13:00 UTC = 18:00 (6:00 PM) Asia/Karachi, Mon-Fri
-  workflow_dispatch: {}
+  workflow_dispatch: {}    # Manual trigger only — run this ONCE to seed the DB
+
 jobs:
-  update:
+  backfill:
     runs-on: ubuntu-latest
+    timeout-minutes: 360   # allow up to 6 hours for large historical data
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -r requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
       - name: Set up SSH tunnel to Oracle VM
         env:
@@ -26,8 +30,8 @@ jobs:
               ubuntu@193.123.76.154
           sleep 3
 
-      - name: Run Daily Update (Upload to Postgres)
-        run: python scripts/daily_update.py
+      - name: Run Full GitHub Backfill (fetch all releases → clean → upload to Postgres)
+        run: python scripts/github_full_backfill.py
         env:
           PG_DSN: "postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@localhost:15432/${{ secrets.DB_NAME }}"
           GITHUB_TOKEN: ${{ secrets.GH_DATA_TOKEN }}
@@ -41,7 +45,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: reports, path: reports/ }
+        with: { name: backfill-reports, path: reports/ }
+
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: csv_out, path: csv_out/ }
+        with: { name: backfill-csv, path: csv_out/ }
