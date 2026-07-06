@@ -15,7 +15,6 @@ import polars as pl
 
 from pipeline.config import PipelineConfig, load_config
 from pipeline.timezone import run_self_test
-from pipeline.calendar_psx import expected_trading_days
 from pipeline.ingest import ingest_all, discover_source_files, extract_date_from_filename
 from pipeline.github_sync import sync_recent, sync_date
 from pipeline.clean import clean_ticks
@@ -30,16 +29,19 @@ log = logging.getLogger(__name__)
 
 def run_backfill(config: PipelineConfig):
     """
-    One-time historical build (BUILD_SPEC §5.1).
+    One-time historical build.
 
-    1. Load config, run timezone self-test.
-    2. Sync last-week data from GitHub.
-    3. Enumerate raw files from LOCAL_HISTORICAL_DIR + GitHub pull.
-    4. Build expected PSX calendar over the full covered range.
-    5. dedup_days audit → mark CONFLICT days.
-    6. For each expected day: clean → aggregate → validate → write
-    7. Emit coverage report.
-    8. Print summary.
+    Processes every date that has actual data — no calendar pre-filter.
+    Weekend scrapes and holiday carry-overs are rejected naturally by the
+    validate_candles min_session_minutes threshold (< 60 populated minutes
+    → MISSING). This removes the need to maintain a holidays list.
+
+    Steps:
+      1. Timezone self-test.
+      2. Sync last-week data from GitHub.
+      3. Ingest all raw files and group ticks by trade date.
+      4. For each date with data: clean → aggregate → validate → write.
+      5. Coverage report + summary.
     """
     print("🚀 Starting PSX Candle Pipeline — BACKFILL")
     print(f"   Historical data: {config.local_historical_dir}")
@@ -59,8 +61,7 @@ def run_backfill(config: PipelineConfig):
             token=config.github_token,
         )
 
-    # Step 3: Determine date range from filenames (NOT from data timestamps,
-    # which can contain stale/erroneous values from years ago)
+    # Step 3: Determine date range from filenames
     source_files = discover_source_files(config)
     file_dates = sorted(set(
         d for f in source_files
@@ -72,14 +73,7 @@ def run_backfill(config: PipelineConfig):
 
     min_date = file_dates[0]
     max_date = file_dates[-1]
-    print(f"   File date range: {min_date} -> {max_date} ({len(file_dates)} files)")
-
-    # Step 4: Build expected trading calendar from FILE date range
-    holidays_path = config.project_root / "config" / "holidays.yaml"
-    expected_days = expected_trading_days(
-        min_date, max_date, holidays_path, config.session.days,
-    )
-    print(f"   Expected trading days: {len(expected_days)}")
+    print(f"   File date range: {min_date} → {max_date} ({len(file_dates)} files)")
 
     # Step 3b: Ingest all raw files
     print("Ingesting raw data files...")
@@ -90,88 +84,76 @@ def run_backfill(config: PipelineConfig):
         return
     print(f"   Day-chunks ingested: {len(day_chunks)}")
 
-    # Step 5: Merge all chunks by trade date.
-    # Multiple files can contribute ticks for the same trading day (e.g.,
-    # weekend cron posts Saturday/Sunday files containing Friday's data).
-    # We merge them into one pool per date and let clean.py handle row-level
-    # exact-duplicate removal. This is correct for overlapping source files.
+    # Step 4: Merge all chunks by trade date.
+    # Multiple files can contribute ticks for the same day (e.g. a Sunday
+    # scrape contains Saturday + Friday data). Merge into one pool per date
+    # and let clean_ticks handle row-level deduplication.
     print("Merging day-chunks by trade date...")
     data_by_date = {}
     for d, df in day_chunks:
         data_by_date.setdefault(d, []).append(df)
 
-    # Log duplicate-source days for auditing
     dup_dates = {d: len(dfs) for d, dfs in data_by_date.items() if len(dfs) > 1}
     if dup_dates:
         print(f"   {len(dup_dates)} dates have data from multiple files (will merge + dedup ticks)")
 
-    # Step 6: Process each day
-    print("Processing days: clean -> aggregate -> validate -> write")
-    db = create_backend(config)
+    # Process every date that has data — no calendar pre-filter.
+    # validate_candles will mark weekends/holidays as MISSING automatically
+    # (they won't have enough session minutes to pass the threshold).
+    all_dates = sorted(data_by_date.keys())
+    print(f"   Dates with data: {len(all_dates)}")
+    print("Processing days: clean → aggregate → validate → write")
 
+    db = create_backend(config)
     day_statuses = {}
     all_symbols = set()
     total_candles = 0
     pending_day_statuses = []  # batch DB writes
 
-    for i, expected_date in enumerate(expected_days):
-        progress = f"[{i+1}/{len(expected_days)}]"
-
-
-
-        if expected_date not in data_by_date:
-            # MISSING — no data for this day
-            day_statuses[expected_date] = {
-                "status": "MISSING",
-                "reason": "absent",
-                "minutes_count": 0,
-                "symbols_count": 0,
-            }
-            pending_day_statuses.append(("*", expected_date, "MISSING", "absent"))
-            if (i + 1) % 50 == 0:
-                print(f"  {progress} ... (MISSING batch)")
-            continue
+    for i, trade_date in enumerate(all_dates):
+        progress = f"[{i+1}/{len(all_dates)}]"
 
         # Combine all DataFrames for this date (in case of multiple sources)
-        dfs = data_by_date[expected_date]
+        dfs = data_by_date[trade_date]
         df = pl.concat(dfs) if len(dfs) > 1 else dfs[0]
 
         # Clean
-        cleaned, clean_stats = clean_ticks(df, expected_date, config)
+        cleaned, clean_stats = clean_ticks(df, trade_date, config)
 
         if cleaned.is_empty():
-            day_statuses[expected_date] = {
+            day_statuses[trade_date] = {
                 "status": "MISSING",
                 "reason": "corrupt",
                 "minutes_count": 0,
                 "symbols_count": 0,
             }
-            pending_day_statuses.append(("*", expected_date, "MISSING", "corrupt"))
-            print(f"  {progress} {expected_date}: MISSING (corrupt)")
+            pending_day_statuses.append(("*", trade_date, "MISSING", "corrupt"))
+            print(f"  {progress} {trade_date}: MISSING (corrupt — no valid ticks after cleaning)")
             continue
 
         # Aggregate
-        candles = aggregate_to_1m(cleaned, expected_date)
+        candles = aggregate_to_1m(cleaned, trade_date)
 
-        # Validate
+        # Validate — min_session_minutes threshold naturally filters out
+        # weekends, holidays, and low-data carry-over days
         valid_candles, quarantined, day_stats = validate_candles(
-            candles, expected_date, config,
+            candles, trade_date, config,
         )
 
-        # Write validation reports
         write_validation_report(day_stats, config.reports_dir)
-        write_quarantine(quarantined, expected_date, config.reports_dir)
+        write_quarantine(quarantined, trade_date, config.reports_dir)
 
-        day_statuses[expected_date] = day_stats
+        day_statuses[trade_date] = day_stats
 
         if day_stats["status"] == "MISSING":
-            pending_day_statuses.append(("*", expected_date, "MISSING", day_stats.get("reason")))
-            print(f"  {progress} {expected_date}: MISSING ({day_stats.get('reason')})")
+            pending_day_statuses.append(("*", trade_date, "MISSING", day_stats.get("reason")))
+            dow = trade_date.strftime("%a")
+            print(f"  {progress} {trade_date} ({dow}): MISSING ({day_stats.get('reason')})")
             continue
 
         # Write outputs
         db.upsert_candles(valid_candles)
-        write_candle_csvs(valid_candles, expected_date, config.csv_out_dir)
+        write_candle_csvs(valid_candles, trade_date, config.csv_out_dir)
 
         # Update day_status per symbol
         symbols = valid_candles.select("symbol").unique().to_series().to_list()
@@ -179,7 +161,7 @@ def run_backfill(config: PipelineConfig):
             sym_candles = valid_candles.filter(pl.col("symbol") == sym)
             ts_col = sym_candles.select("ts").to_series()
             db.upsert_day_status(
-                sym, expected_date, "COMPLETE", None,
+                sym, trade_date, "COMPLETE", None,
                 minutes_count=sym_candles.height,
                 first_ts=str(ts_col.min()),
                 last_ts=str(ts_col.max()),
@@ -187,18 +169,18 @@ def run_backfill(config: PipelineConfig):
             all_symbols.add(sym)
 
         total_candles += valid_candles.height
-        print(f"  {progress} {expected_date}: COMPLETE ({valid_candles.height} candles, {len(symbols)} symbols)")
+        dow = trade_date.strftime("%a")
+        print(f"  {progress} {trade_date} ({dow}): COMPLETE ({valid_candles.height} candles, {len(symbols)} symbols)")
 
-    # Flush all pending MISSING/CONFLICT day_status entries in one batch
+    # Flush all pending MISSING entries in one batch
     if pending_day_statuses:
-        print(f"\n   Flushing {len(pending_day_statuses)} MISSING/CONFLICT day_status entries...")
+        print(f"\n   Flushing {len(pending_day_statuses)} MISSING day_status entries...")
         db.batch_upsert_day_statuses(pending_day_statuses)
 
-    # Step 7: Coverage report
+    # Step 5: Coverage report
     print("\nWriting coverage report...")
-    coverage = write_coverage_report(expected_days, day_statuses, config.reports_dir)
+    coverage = write_coverage_report(all_dates, day_statuses, config.reports_dir)
 
-    # Step 8: Summary
     print_summary(coverage, total_candles, len(all_symbols), (min_date, max_date))
 
     db.close()
