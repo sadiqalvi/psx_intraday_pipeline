@@ -199,26 +199,61 @@ class PostgreSQLBackend:
         log.info("PostgreSQL schema initialized")
 
     def upsert_candles(self, candles: pl.DataFrame):
-        """Upsert candles into PostgreSQL."""
+        """
+        Bulk-upsert candles into PostgreSQL using COPY + temp table.
+
+        Strategy (avoids N round-trips through the SSH tunnel):
+          1. COPY all rows into a temporary table (1 network round-trip).
+          2. INSERT ... ON CONFLICT DO UPDATE from temp → real table (1 round-trip).
+        """
         if candles.is_empty():
             return
 
-        cursor = self.conn.cursor()
         cols = ["symbol", "ts", "open", "high", "low", "close", "volume", "had_trade"]
         df = candles.select([c for c in cols if c in candles.columns])
-        rows = df.to_pandas().values.tolist()
 
-        for row in rows:
-            cursor.execute("""
-                INSERT INTO candles_1m (symbol, ts, open, high, low, close, volume, had_trade)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (symbol, ts) DO UPDATE SET
-                    open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
-                    close=EXCLUDED.close, volume=EXCLUDED.volume, had_trade=EXCLUDED.had_trade
-            """, row)
+        # Ensure ts is a plain string so COPY treats it as text
+        df = df.with_columns(pl.col("ts").cast(pl.Utf8))
+
+        cursor = self.conn.cursor()
+
+        # Temp table matches the real table's structure (no PK needed here)
+        cursor.execute("""
+            CREATE TEMP TABLE _candles_staging (
+                symbol    TEXT,
+                ts        TEXT,
+                open      DOUBLE PRECISION,
+                high      DOUBLE PRECISION,
+                low       DOUBLE PRECISION,
+                close     DOUBLE PRECISION,
+                volume    BIGINT,
+                had_trade BOOLEAN
+            ) ON COMMIT DROP
+        """)
+
+        # Stream rows via COPY (single round-trip regardless of row count)
+        with cursor.copy(
+            "COPY _candles_staging (symbol, ts, open, high, low, close, volume, had_trade) FROM STDIN"
+        ) as copy:
+            for row in df.iter_rows():
+                copy.row(*row)
+
+        # Upsert from staging → real table (one SQL statement)
+        cursor.execute("""
+            INSERT INTO candles_1m (symbol, ts, open, high, low, close, volume, had_trade)
+            SELECT symbol, ts::timestamptz, open, high, low, close, volume, had_trade
+            FROM _candles_staging
+            ON CONFLICT (symbol, ts) DO UPDATE SET
+                open      = EXCLUDED.open,
+                high      = EXCLUDED.high,
+                low       = EXCLUDED.low,
+                close     = EXCLUDED.close,
+                volume    = EXCLUDED.volume,
+                had_trade = EXCLUDED.had_trade
+        """)
 
         self.conn.commit()
-        log.info("Upserted %d candles to PostgreSQL", len(rows))
+        log.info("Bulk-upserted %d candles to PostgreSQL (COPY+temp)", df.height)
 
     def upsert_day_status(
         self,
@@ -259,14 +294,14 @@ class PostgreSQLBackend:
     def batch_upsert_day_statuses(self, entries):
         """Batch upsert day_status rows. entries = list of (symbol, trade_date, status, reason)."""
         cursor = self.conn.cursor()
-        for s, d, st, r in entries:
-            cursor.execute("""
-                INSERT INTO day_status (symbol, trade_date, status, reason, minutes_count)
-                VALUES (%s, %s, %s, %s, 0)
-                ON CONFLICT (symbol, trade_date) DO UPDATE SET
-                    status=EXCLUDED.status, reason=EXCLUDED.reason,
-                    built_at=now()
-            """, (s, d, st, r))
+        # executemany sends all rows in a single prepared-statement batch
+        cursor.executemany("""
+            INSERT INTO day_status (symbol, trade_date, status, reason, minutes_count)
+            VALUES (%s, %s, %s, %s, 0)
+            ON CONFLICT (symbol, trade_date) DO UPDATE SET
+                status=EXCLUDED.status, reason=EXCLUDED.reason,
+                built_at=now()
+        """, [(s, d, st, r) for s, d, st, r in entries])
         self.conn.commit()
         log.info("Batch upserted %d day_status entries", len(entries))
 
